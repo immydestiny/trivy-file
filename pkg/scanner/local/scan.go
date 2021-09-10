@@ -10,6 +10,7 @@ import (
 	"time"
         "encoding/json"
         "io/ioutil"
+        //"reflect"
 
 	"github.com/google/wire"
 	"golang.org/x/xerrors"
@@ -25,6 +26,7 @@ import (
 	"github.com/aquasecurity/trivy/pkg/report"
 	"github.com/aquasecurity/trivy/pkg/types"
 	"github.com/aquasecurity/trivy/pkg/utils"
+        "github.com/cavaliercoder/go-rpm"
 )
 
 // SuperSet binds dependencies for Local scan
@@ -113,7 +115,7 @@ func (s Scanner) checkVulnerabilities(target string, detail ftypes.ArtifactDetai
 //		}
 //		eosl = detectedEosl
 //	}
-
+//检测的是Library 不过运行的函数是检测os 的，这个可以优化下，最好可以和上下两种并存
         if utils.StringInSlice(types.VulnTypeLibrary, options.VulnType) {
             result, detectedEosl, err := s.scanOSPkgs(target, detail, options)
             if err != nil {
@@ -138,62 +140,100 @@ func (s Scanner) checkVulnerabilities(target string, detail ftypes.ArtifactDetai
 	return results, eosl, nil
 }
 
+//2021.9.9 新增go 获取pkgs 函数
+func GetPackageFiles(path string) ([]*rpm.PackageFile, error) {
+        // read directory
+        dir, err := ioutil.ReadDir(path)
+        if err != nil {
+                return nil, err
+        }
+
+        // list *.rpm files
+        files := make([]string, 0)
+        for _, f := range dir {
+                if strings.HasSuffix(f.Name(), ".rpm") {
+                        files = append(files, filepath.Join(path, f.Name()))
+                }
+        }
+        // read packages
+        packages := make([]*rpm.PackageFile, len(files))
+        for i, f := range files {
+                p, err := rpm.OpenPackageFile(f)
+                if err != nil {
+                        return nil, err
+                }
+                //fmt.Printf("pkg: - %s - %s - %s \n",p.Name(),p.Version(),p.Release())
+
+                packages[i] = p
+        }
+        
+        return packages, nil
+}
+
+
+
+
 func (s Scanner) scanOSPkgs(target string, detail ftypes.ArtifactDetail, options types.ScanOptions) (
 	*report.Result, bool, error) {
-
-//2021.8.25 修改
+               //2021.9.10 新增
+                
+         
                 var data Class
+                var allpkgs []ftypes.Package
                 log.Logger.Infof("target is : %s", target)
+                //如果要检测的是处理后的json 文件
+                if strings.HasSuffix(target, ".json"){
+                    file, err  := ioutil.ReadFile(target)
+                    if err != nil {
+                        log.Logger.Info(" err to read file  %s", target)
+                    }
+           
+                    json.Unmarshal(file,&data)
+           
+                    for _,p := range data.Pkgs{
+                        detail.Packages = append(detail.Packages,p)
+                    }
+           
+                    log.Logger.Info(" get pkgs")
+ 
+                } else {
+                //如果要处理的只是rpm包目录
                 filepath := target
-                log.Logger.Infof("file is : %s", filepath)
-                detail.OS = &ftypes.OS{
+                p, err := GetPackageFiles(filepath)
+                if err != nil {
+                //    log.Logger.Info(" err to read file  %s", filepath)                 
+                      xerrors.Errorf("failed to get package dir: %w", err)
+                }
+                fmt.Printf("%v\n",p)
+                for _, pkg := range p {
+                    // new version: rpm -qa --qf "%{NAME} %{EPOCHNUM} %{VERSION} %{RELEASE} %{SOURCERPM} %{ARCH}\n"
+                    fmt.Printf("installed package:  %s - %s - %s - %d - %s \n",  pkg.Name(),pkg.Version(),pkg.Release(),pkg.Epoch(),pkg.Architecture())
+                    //fmt.Println(reflect.TypeOf(pkg.Epoch()))      Epoch 为int类型
+                    a := ftypes.Package{
+                        Name:            pkg.Name(),
+                        Epoch:           pkg.Epoch(),
+                        Version:         pkg.Version(),
+                        Release:         pkg.Release(),
+                        Arch:            pkg.Architecture(),
+                    }
+
+
+                    allpkgs = append(allpkgs,a)
+
+                }
+                detail.Packages = allpkgs
+                fmt.Printf("allpkgs: %v \n", allpkgs)
+           
+                 //   fmt.Printf("pkg: - %s - %s - %s \n",pkg.Name(),pkg.Version(),pkg.Release())
+                //fmt.Printf("installed package: %v \n", p)
+                //log.Logger.Infof("file is : %s", filepath)
+               }
+        detail.OS = &ftypes.OS{
                         Family: "centos",
                         Name:   "7.8.2009",
 
                 }                
                 
-                file, err  := ioutil.ReadFile(filepath)
-                if err != nil {
-                    log.Logger.Info(" err to read file  %s", filepath)
-                }
-                
-                json.Unmarshal(file,&data)
-                
-                for _,p := range data.Pkgs{
-                    detail.Packages = append(detail.Packages,p)
-                }
-                
-                log.Logger.Info(" get pkgs")
-                fmt.Printf("%v\n", detail.Packages)  
-                
-                 
-               // detail.Packages = []ftypes.Package{
-               //         {
-               //                 Name:    "musl",
-               //                 Version: "1.2.3",
-               //                 Layer: ftypes.Layer{
-               //                         DiffID: "sha256:ebf12965380b39889c99a9c02e82ba465f887b45975b6e389d42e9e6a3857888",
-               //                 },
-               //         },
-               // }
-
-//        	detail = ftypes.ArtifactDetail{
-//		OS: &ftypes.OS{
-//			Family: "centos",
-//			Name:   "7.8.2009",
-//
-//		},
-//		Packages: []ftypes.Package{
-//			{
-//				Name:    "musl",
-//				Version: "1.2.3",
-//				Layer: ftypes.Layer{
-//					DiffID: "sha256:ebf12965380b39889c99a9c02e82ba465f887b45975b6e389d42e9e6a3857888",
-//				},
-//			},
-//		},
-//	}
-
 	if detail.OS == nil {
 		log.Logger.Debug("Detected OS: unknown")
 		return nil, false, nil
